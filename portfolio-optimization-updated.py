@@ -38,6 +38,7 @@ Dependencies:
 
 Usage:
 Run the script using: streamlit run streamlit_app2.py
+streamlit run portfolio-optimization-updated.py
 """
 
 #import libraries
@@ -47,7 +48,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import streamlit as st
-
 
 st.title("Portfolio Optimization using Monte Carlo Simulations")
 
@@ -64,24 +64,32 @@ st.write(f"Fetching historical data for: {', '.join(ticker_list)}")
 data = {}
 for ticker in ticker_list:
     try:
-        data[ticker] = yf.download(ticker, start=start_date, end=end_date)
-        if "Adj Close" not in data[ticker].columns:
-            st.warning(f"'Adj Close' not found for ticker: {ticker}. Skipping...")
+        st.write(f"Fetching data for {ticker}...")
+        df = yf.download(ticker, start=start_date, end=end_date)
+        if not df.empty and "Close" in df.columns:
+            data[ticker] = df
+            if df.index[0] > pd.to_datetime(start_date) or df.index[-1] < pd.to_datetime(end_date):
+                st.warning(f"Data for {ticker} is only available from {df.index[0].date()} to {df.index[-1].date()}.")
+        else:
+            st.warning(f"No 'Close' data available for ticker: {ticker}. Skipping...")
     except Exception as e:
-        st.error(f"Failed to fetch data for {ticker}: {e}")
-        data[ticker] = None
+        st.error(f"Error fetching data for {ticker}: {e}")
 
-# Filter out invalid tickers and combine adjusted close prices
-valid_data = {ticker: df for ticker, df in data.items() if df is not None and "Adj Close" in df.columns}
+# Combine closing prices
+valid_data = {ticker: df for ticker, df in data.items() if df is not None and not df.empty and "Close" in df.columns}
 if valid_data:
-    prices = pd.concat([valid_data[ticker]["Adj Close"] for ticker in valid_data], axis=1)
+    prices = pd.concat([valid_data[ticker]["Close"] for ticker in valid_data], axis=1)
     prices.columns = list(valid_data.keys())
 else:
-    st.error("No valid data available for the selected tickers.")
-    prices = pd.DataFrame()
+    st.error("No valid data available for the selected tickers. Verify ticker symbols and date range.")
+    st.stop()
 
 # Calculate daily returns
 returns = prices.pct_change().dropna()
+if returns.empty:
+    st.error("No valid return data available. Check the selected tickers and date range.")
+    st.stop()
+
 mean_returns = returns.mean() * 252
 cov_matrix = returns.cov() * 252
 
@@ -92,7 +100,7 @@ constraints = {
         "min": st.sidebar.slider(f"Min weight for {ticker}", 0.0, 1.0, 0.0, 0.01),
         "max": st.sidebar.slider(f"Max weight for {ticker}", 0.0, 1.0, 1.0, 0.01)
     }
-    for ticker in ticker_list
+    for ticker in valid_data.keys()
 }
 st.sidebar.write("Risk-Free Asset Constraints")
 rf_min = st.sidebar.slider("Min weight for Risk-Free Asset", 0.0, 1.0, 0.0, 0.01)
@@ -100,19 +108,23 @@ rf_max = st.sidebar.slider("Max weight for Risk-Free Asset", 0.0, 1.0, 1.0, 0.01
 
 # Simulate portfolios (including risk-free asset)
 st.write("Running Monte Carlo Simulation...")
-weights = np.random.dirichlet(np.ones(len(ticker_list) + 1), size=num_portfolios)  # Include risk-free asset
+weights = np.random.dirichlet(np.ones(len(valid_data) + 1), size=num_portfolios)  # Include risk-free asset
 weights_risky = weights[:, :-1]
 weights_rf = weights[:, -1]  # Weight for risk-free asset
 
 # Apply the constraints
 valid_indices = np.ones(len(weights), dtype=bool)
-for i, ticker in enumerate(ticker_list):
+for i, ticker in enumerate(valid_data.keys()):
     valid_indices &= (weights_risky[:, i] >= constraints[ticker]["min"]) & (weights_risky[:, i] <= constraints[ticker]["max"])
 valid_indices &= (weights_rf >= rf_min) & (weights_rf <= rf_max)
 
 weights_risky = weights_risky[valid_indices]
 weights_rf = weights_rf[valid_indices]
 weights = weights[valid_indices]
+
+if len(weights) == 0:
+    st.error("No valid portfolios found after applying constraints. Adjust the constraints and try again.")
+    st.stop()
 
 portfolio_returns = np.dot(weights_risky, mean_returns) + weights_rf * risk_free_rate
 portfolio_vol = np.sqrt(np.einsum('ij,jk,ik->i', weights_risky, cov_matrix.values, weights_risky))
@@ -172,7 +184,7 @@ st.subheader("Downloadable Report")
 def generate_report():
     # Create a DataFrame for weights
     weights_data = {
-        "Ticker": ticker_list + ["Risk-Free Asset"],
+        "Ticker": list(valid_data.keys()) + ["Risk-Free Asset"],
         "Optimal Weight": list(optimal_weights)
     }
     weights_df = pd.DataFrame(weights_data)
